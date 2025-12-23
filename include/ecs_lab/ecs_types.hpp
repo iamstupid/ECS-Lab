@@ -16,8 +16,16 @@ constexpr std::uint32_t kGenAliveBit = 0x80000000u;
 constexpr std::uint32_t kGenMask = 0x7FFFFFFFu;
 
 struct Entity {
+  // Monotonic, globally-unique identifier for this entity instance.
+  // Intended for debugging / deterministic ordering / "name"/key usage (e.g. map keys).
   std::uint64_t entity_id = 0;
+
+  // Index into the world's entity arena (fast indexing).
+  // NOTE: entity_idx is reused after destroy; it is NOT a stable identifier.
   std::uint32_t entity_idx = 0;
+
+  // Generation counter (lower bits) + alive bit (MSB).
+  // Together with entity_idx, this forms the stable handle for an entity instance.
   std::uint32_t gen = 0;
 };
 
