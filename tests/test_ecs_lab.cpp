@@ -852,3 +852,59 @@ TEST_CASE("Stress: random add/remove/destroy and verify invariants") {
   CHECK(hp_count == exp_hp);
   CHECK(vel_count == exp_vel);
 }
+
+TEST_CASE("ECS query iterates entities with required components") {
+  ecs_lab::World world;
+
+  auto e1 = world.create();
+  world.add<Position>(e1, 1, 1);
+
+  auto e2 = world.create();
+  world.add<Position>(e2, 2, 2);
+  world.add<Health>(e2, 10);
+
+  auto e3 = world.create();
+  world.add<Health>(e3, 20);
+
+  auto e4 = world.create();
+  world.add<Position>(e4, 3, 3);
+  world.add<Health>(e4, 30);
+  world.add<Velocity>(e4, 4.0f, 4.0f);
+
+  int count = 0;
+  int sum = 0;
+  world.query<Position, Health>([&](ecs_lab::Entity, Position& p, Health& h) {
+    ++count;
+    sum += p.x + h.hp;
+    h.hp += 1;
+  });
+
+  CHECK(count == 2);
+  CHECK(sum == 45);
+  CHECK(world.get<Health>(e2).hp == 11);
+  CHECK(world.get<Health>(e4).hp == 31);
+}
+
+TEST_CASE("ECS query early-exits when a required pool does not exist") {
+  struct Unused {};
+
+  ecs_lab::World world;
+  auto e = world.create();
+  world.add<Position>(e, 1, 2);
+
+  int count = 0;
+  world.query<Position, Unused>([&](ecs_lab::Entity, Position&, Unused&) { ++count; });
+  CHECK(count == 0);
+}
+
+TEST_CASE("ECS query driver pool missing does nothing") {
+  struct Unused {};
+
+  ecs_lab::World world;
+  auto e = world.create();
+  world.add<Position>(e, 1, 2);
+
+  int count = 0;
+  world.query<Unused, Position>([&](ecs_lab::Entity, Unused&, Position&) { ++count; });
+  CHECK(count == 0);
+}

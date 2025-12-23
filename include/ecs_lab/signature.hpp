@@ -98,6 +98,16 @@ public:
     }
   }
 
+  bool contains_all(const Signature& required) const noexcept {
+    for (std::size_t i = 0; i < kWordCount; ++i) {
+      const std::uint64_t want = required.words_[i];
+      if ((words_[i] & want) != want) {
+        return false;
+      }
+    }
+    return true;
+  }
+
 private:
   static inline std::uint32_t popcnt64(std::uint64_t value) {
 #if defined(_MSC_VER)

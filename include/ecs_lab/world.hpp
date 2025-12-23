@@ -10,12 +10,28 @@
 #include <cstdint>
 #include <memory>
 #include <memory_resource>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 namespace ecs_lab {
 
 class EntityProxy;
+
+template <typename T>
+struct QueryAccess {
+  ComponentId cid = 0;
+  Pool<T>* pool = nullptr;
+};
+
+template <typename T>
+T& query_get(EntityMeta& meta, const QueryAccess<T>& access) {
+  assert(access.pool != nullptr);
+  const std::size_t pos = meta.sig.rank(access.cid);
+  assert(pos < meta.idx.size());
+  const DenseIndex di = meta.idx[pos];
+  return access.pool->items[di].data;
+}
 
 class World {
 public:
@@ -245,6 +261,51 @@ public:
     }
   }
 
+  template <typename T0, typename... Ts, typename Fn>
+  void query(Fn&& fn) {
+    static_assert(are_unique<T0, Ts...>::value, "Query component types must be unique.");
+
+    auto* pool0 = get_pool_if_exists<T0>();
+    if (!pool0) {
+      return;
+    }
+
+    auto access = std::make_tuple(QueryAccess<Ts>{component_id<Ts>(), get_pool_if_exists<Ts>()}...);
+    if constexpr (sizeof...(Ts) > 0) {
+      bool ok = true;
+      std::apply([&](auto&... a) { ok = ((a.pool != nullptr) && ...); }, access);
+      if (!ok) {
+        return;
+      }
+    }
+
+    Signature<kMaxComponents> required{};
+    required.clear();
+    required.set(component_id<T0>());
+    (required.set(component_id<Ts>()), ...);
+
+    const std::size_t count = pool0->items.size();
+    for (std::size_t i = 0; i < count; ++i) {
+      auto& comp0 = pool0->items[i];
+      auto& meta = arena_.at(comp0.entity_idx);
+      if ((meta.gen & kGenAliveBit) == 0 || meta.gen != comp0.gen) {
+        continue;
+      }
+      if constexpr (sizeof...(Ts) > 0) {
+        if (!meta.sig.contains_all(required)) {
+          continue;
+        }
+      }
+      Entity e{meta.entity_id, comp0.entity_idx, comp0.gen};
+
+      if constexpr (sizeof...(Ts) == 0) {
+        fn(e, comp0.data);
+      } else {
+        std::apply([&](auto&... a) { fn(e, comp0.data, query_get(meta, a)...); }, access);
+      }
+    }
+  }
+
   template <typename... Ts>
   Entity instantiate(const Prefab<Ts...>& prefab) {
     static_assert(are_unique<Ts...>::value, "Prefab component types must be unique.");
@@ -342,6 +403,15 @@ private:
       return nullptr;
     }
     return static_cast<const Pool<T>*>(pools_[cid].get());
+  }
+
+  template <typename T>
+  Pool<T>* get_pool_if_exists() {
+    const ComponentId cid = component_id<T>();
+    if (cid >= pools_.size()) {
+      return nullptr;
+    }
+    return static_cast<Pool<T>*>(pools_[cid].get());
   }
 
   EntityMeta* validate(Entity e) {
