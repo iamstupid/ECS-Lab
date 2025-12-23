@@ -1,0 +1,12 @@
+/out/
+/build/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+CTestTestfile.cmake
+Testing/
+*.user
+*.suo
+*.vcxproj*
+.vs/
+.vscode/
