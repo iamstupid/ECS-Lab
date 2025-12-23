@@ -296,7 +296,8 @@ TEST_CASE("Entity slot reuse with generation increment") {
 
   auto e2 = world.create();
   CHECK(e2.entity_idx == old_idx);
-  CHECK(e2.gen == ((old_gen + 1) & ecs_lab::kGenMask) | ecs_lab::kGenAliveBit);
+  const auto expected_gen = ((old_gen + 1) & ecs_lab::kGenMask) | ecs_lab::kGenAliveBit;
+  CHECK(e2.gen == expected_gen);
 
   CHECK(!world.is_alive(e1));
   CHECK(world.is_alive(e2));
