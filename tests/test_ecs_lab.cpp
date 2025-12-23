@@ -3,6 +3,8 @@
 
 #include "ecs_lab/ecs.hpp"
 
+#include <vector>
+
 namespace {
 
 struct Position {
@@ -186,6 +188,23 @@ struct Tag {};
 struct Counter {
   int value = 0;
 };
+
+struct Expected {
+  bool alive = false;
+  bool has_pos = false;
+  bool has_hp = false;
+  bool has_vel = false;
+  Position pos{};
+  Health hp{};
+  Velocity vel{};
+};
+
+static std::uint32_t xorshift32(std::uint32_t& state) {
+  state ^= state << 13;
+  state ^= state >> 17;
+  state ^= state << 5;
+  return state;
+}
 
 TEST_CASE("Signature rank calculates correctly with multiple components") {
   ecs_lab::World world;
@@ -649,4 +668,187 @@ TEST_CASE("add_missing_components with destroyed entities is no-op") {
 
   world.add_missing_components(dst, src);
   CHECK(!world.has<Position>(dst));
+}
+
+TEST_CASE("add_missing_components copies values independently") {
+  ecs_lab::World world;
+  auto src = world.create();
+  auto dst = world.create();
+
+  world.add<Position>(src, 1, 2);
+  world.add<Health>(src, 7);
+  world.add_missing_components(dst, src);
+
+  CHECK(world.get<Position>(dst).x == 1);
+  CHECK(world.get<Position>(dst).y == 2);
+  CHECK(world.get<Health>(dst).hp == 7);
+
+  world.get<Position>(src).x = 99;
+  world.get<Health>(src).hp = 42;
+
+  CHECK(world.get<Position>(dst).x == 1);
+  CHECK(world.get<Health>(dst).hp == 7);
+}
+
+TEST_CASE("EntityProxy handles multiple components and selective invalidation") {
+  ecs_lab::World world;
+  auto e = world.create();
+
+  world.add<Position>(e, 1, 2);
+  world.add<Health>(e, 10);
+
+  auto proxy = world.get_proxy(e);
+  REQUIRE(proxy != nullptr);
+  REQUIRE(proxy->try_get<Position>() != nullptr);
+  REQUIRE(proxy->try_get<Health>() != nullptr);
+
+  world.remove<Health>(e);
+
+  CHECK(proxy->try_get<Health>() == nullptr);
+  auto* pos = proxy->try_get<Position>();
+  REQUIRE(pos != nullptr);
+  CHECK(pos->x == 1);
+  CHECK(pos->y == 2);
+
+  world.remove<Position>(e);
+  CHECK(proxy->try_get<Position>() == nullptr);
+}
+
+TEST_CASE("Stress: random add/remove/destroy and verify invariants") {
+  ecs_lab::World world;
+  constexpr std::size_t kEntityCount = 2000;
+  constexpr std::size_t kOps = 20000;
+
+  std::vector<ecs_lab::Entity> entities;
+  std::vector<Expected> expected;
+  entities.reserve(kEntityCount);
+  expected.resize(kEntityCount);
+
+  for (std::size_t i = 0; i < kEntityCount; ++i) {
+    entities.push_back(world.create());
+    expected[i].alive = true;
+  }
+
+  std::uint32_t rng = 0x12345678u;
+  for (std::size_t step = 0; step < kOps; ++step) {
+    const std::size_t idx = xorshift32(rng) % kEntityCount;
+    const std::uint32_t op = xorshift32(rng) % 7;
+    auto& e = entities[idx];
+    auto& ex = expected[idx];
+
+    if (!ex.alive) {
+      e = world.create();
+      ex = Expected{};
+      ex.alive = true;
+    }
+
+    switch (op) {
+      case 0: {
+        const int x = static_cast<int>(xorshift32(rng) & 0xFF);
+        const int y = static_cast<int>(xorshift32(rng) & 0xFF);
+        if (ex.has_pos) {
+          auto& pos = world.get<Position>(e);
+          pos.x = x;
+          pos.y = y;
+        } else {
+          world.add<Position>(e, x, y);
+          ex.has_pos = true;
+        }
+        ex.pos = Position{x, y};
+        break;
+      }
+      case 1: {
+        const int hp = static_cast<int>(xorshift32(rng) & 0x3FF);
+        if (ex.has_hp) {
+          world.get<Health>(e).hp = hp;
+        } else {
+          world.add<Health>(e, hp);
+          ex.has_hp = true;
+        }
+        ex.hp = Health{hp};
+        break;
+      }
+      case 2: {
+        const float vx = static_cast<float>(xorshift32(rng) & 0x7F);
+        const float vy = static_cast<float>(xorshift32(rng) & 0x7F);
+        if (ex.has_vel) {
+          auto& vel = world.get<Velocity>(e);
+          vel.vx = vx;
+          vel.vy = vy;
+        } else {
+          world.add<Velocity>(e, vx, vy);
+          ex.has_vel = true;
+        }
+        ex.vel = Velocity{vx, vy};
+        break;
+      }
+      case 3:
+        world.remove<Position>(e);
+        ex.has_pos = false;
+        break;
+      case 4:
+        world.remove<Health>(e);
+        ex.has_hp = false;
+        break;
+      case 5:
+        world.remove<Velocity>(e);
+        ex.has_vel = false;
+        break;
+      case 6:
+      default:
+        world.destroy(e);
+        ex = Expected{};
+        ex.alive = false;
+        break;
+    }
+
+    if (ex.alive) {
+      CHECK(world.is_alive(e));
+      CHECK(world.has<Position>(e) == ex.has_pos);
+      CHECK(world.has<Health>(e) == ex.has_hp);
+      CHECK(world.has<Velocity>(e) == ex.has_vel);
+      if (ex.has_pos) {
+        auto& pos = world.get<Position>(e);
+        CHECK(pos.x == ex.pos.x);
+        CHECK(pos.y == ex.pos.y);
+      }
+      if (ex.has_hp) {
+        CHECK(world.get<Health>(e).hp == ex.hp.hp);
+      }
+      if (ex.has_vel) {
+        auto& vel = world.get<Velocity>(e);
+        CHECK(vel.vx == ex.vel.vx);
+        CHECK(vel.vy == ex.vel.vy);
+      }
+    }
+  }
+
+  int pos_count = 0;
+  int hp_count = 0;
+  int vel_count = 0;
+  world.each<Position>([&](ecs_lab::Entity, Position&) { ++pos_count; });
+  world.each<Health>([&](ecs_lab::Entity, Health&) { ++hp_count; });
+  world.each<Velocity>([&](ecs_lab::Entity, Velocity&) { ++vel_count; });
+
+  int exp_pos = 0;
+  int exp_hp = 0;
+  int exp_vel = 0;
+  for (const auto& ex : expected) {
+    if (!ex.alive) {
+      continue;
+    }
+    if (ex.has_pos) {
+      ++exp_pos;
+    }
+    if (ex.has_hp) {
+      ++exp_hp;
+    }
+    if (ex.has_vel) {
+      ++exp_vel;
+    }
+  }
+
+  CHECK(pos_count == exp_pos);
+  CHECK(hp_count == exp_hp);
+  CHECK(vel_count == exp_vel);
 }
