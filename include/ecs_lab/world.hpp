@@ -122,6 +122,30 @@ public:
     return &pool.items[di].data;
   }
 
+  // Fast access when you only have (entity_idx, gen).
+  // Useful for compact references inside components (idx+gen), without storing entity_id.
+  template <typename T>
+  T* try_get_idx_gen(std::uint32_t entity_idx, std::uint32_t gen) {
+    if (entity_idx >= arena_.size()) {
+      return nullptr;
+    }
+    auto& meta = arena_.at(entity_idx);
+    if ((meta.gen & kGenAliveBit) == 0 || meta.gen != gen) {
+      return nullptr;
+    }
+    const ComponentId cid = component_id<T>();
+    if (!meta.sig.test(cid)) {
+      return nullptr;
+    }
+    const std::size_t pos = meta.sig.rank(cid);
+    const DenseIndex di = meta.idx[pos];
+    auto* pool = get_pool_if_exists<T>();
+    if (!pool) {
+      return nullptr;
+    }
+    return &pool->items[di].data;
+  }
+
   template <typename T>
   Component<T>* try_get_component(Entity e) {
     auto* meta = validate(e);
@@ -136,6 +160,28 @@ public:
     const DenseIndex di = meta->idx[pos];
     auto& pool = get_pool<T>();
     return &pool.items[di];
+  }
+
+  template <typename T>
+  const T* try_get_idx_gen(std::uint32_t entity_idx, std::uint32_t gen) const {
+    if (entity_idx >= arena_.size()) {
+      return nullptr;
+    }
+    const auto& meta = arena_.at(entity_idx);
+    if ((meta.gen & kGenAliveBit) == 0 || meta.gen != gen) {
+      return nullptr;
+    }
+    const ComponentId cid = component_id<T>();
+    if (!meta.sig.test(cid)) {
+      return nullptr;
+    }
+    const std::size_t pos = meta.sig.rank(cid);
+    const DenseIndex di = meta.idx[pos];
+    const auto* pool = get_pool_const<T>();
+    if (!pool) {
+      return nullptr;
+    }
+    return &pool->items[di].data;
   }
 
   template <typename T>
