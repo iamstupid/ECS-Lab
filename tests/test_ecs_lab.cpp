@@ -118,6 +118,28 @@ TEST_CASE("ECS snapshot restore") {
   CHECK(world.get<Position>(a).y == 4);
 }
 
+TEST_CASE("ECS resolve_idx_gen") {
+  ecs_lab::World world;
+  auto a = world.create();
+
+  auto r0 = world.resolve_idx_gen(a.entity_idx, a.gen);
+  CHECK(r0.entity_id == a.entity_id);
+  CHECK(r0.entity_idx == a.entity_idx);
+  CHECK(r0.gen == a.gen);
+
+  world.destroy(a);
+  auto r1 = world.resolve_idx_gen(a.entity_idx, a.gen);
+  CHECK(r1.entity_id == 0);
+
+  auto b = world.create();
+  CHECK(b.entity_idx == a.entity_idx);
+  CHECK(b.gen == a.gen + 1);
+  auto r2 = world.resolve_idx_gen(b.entity_idx, b.gen);
+  CHECK(r2.entity_id == b.entity_id);
+  auto r3 = world.resolve_idx_gen(b.entity_idx, a.gen);
+  CHECK(r3.entity_id == 0);
+}
+
 TEST_CASE("ECS add_missing_components copies from source") {
   ecs_lab::World world;
   auto src = world.create();

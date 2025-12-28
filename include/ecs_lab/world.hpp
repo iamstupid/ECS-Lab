@@ -97,6 +97,19 @@ public:
     return validate_const(e) != nullptr;
   }
 
+  // Reconstruct a full Entity handle (including entity_id) from (entity_idx, gen).
+  // Returns Entity{0,0,0} if the handle is not alive / mismatched.
+  Entity resolve_idx_gen(std::uint32_t entity_idx, std::uint32_t gen) const {
+    if (entity_idx >= arena_.size()) {
+      return Entity{};
+    }
+    const auto& meta = arena_.at(entity_idx);
+    if ((meta.gen & kGenAliveBit) == 0 || meta.gen != gen) {
+      return Entity{};
+    }
+    return Entity{meta.entity_id, entity_idx, gen};
+  }
+
   template <typename T>
   bool has(Entity e) const {
     const auto* meta = validate_const(e);
