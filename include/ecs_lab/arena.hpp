@@ -31,7 +31,8 @@ struct EntityMeta {
   std::uint32_t gen = 1;
   Signature<kMaxComponents> sig{};
   std::pmr::vector<DenseIndex> idx;
-  std::weak_ptr<EntityProxy> proxy;
+  // Cached pointer to a World-owned proxy object. Not serialized in snapshots.
+  EntityProxy* proxy = nullptr;
 };
 
 class LinearArena {

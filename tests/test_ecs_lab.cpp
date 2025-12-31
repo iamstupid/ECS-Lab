@@ -458,6 +458,34 @@ TEST_CASE("EntityProxy invalidated on entity destroy") {
 
   CHECK(!proxy->is_alive());
   CHECK(proxy->try_get<Position>() == nullptr);
+  CHECK(world.get_proxy(e) == nullptr);
+}
+
+TEST_CASE("EntityProxy invalidated on snapshot restore") {
+  ecs_lab::World world;
+  auto e = world.create();
+  world.add<Position>(e, 1, 2);
+
+  auto proxy = world.get_proxy(e);
+  REQUIRE(proxy != nullptr);
+  REQUIRE(proxy->try_get<Position>() != nullptr);
+
+  auto snap = world.snapshot();
+
+  world.get<Position>(e).x = 99;
+  world.restore(snap);
+
+  // Proxies cache component pointers; restore invalidates them.
+  CHECK(!proxy->is_alive());
+  CHECK(proxy->try_get<Position>() == nullptr);
+
+  auto proxy2 = world.get_proxy(e);
+  REQUIRE(proxy2 != nullptr);
+  CHECK(proxy2->is_alive());
+  auto* pos = proxy2->try_get<Position>();
+  REQUIRE(pos != nullptr);
+  CHECK(pos->x == 1);
+  CHECK(pos->y == 2);
 }
 
 TEST_CASE("EntityProxy shared across multiple get_proxy calls") {
@@ -467,7 +495,7 @@ TEST_CASE("EntityProxy shared across multiple get_proxy calls") {
   auto proxy1 = world.get_proxy(e);
   auto proxy2 = world.get_proxy(e);
 
-  CHECK(proxy1.get() == proxy2.get());
+  CHECK(proxy1 == proxy2);
 }
 
 TEST_CASE("EntityProxy cache updated on swap-erase move") {

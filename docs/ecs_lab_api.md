@@ -189,7 +189,7 @@ world.restore(snap);
 - Component types must be copyable
 
 Notes:
-- Any `EntityProxy` created before `restore()` is invalid after restore
+- Any `EntityProxyRef` obtained before `restore()` becomes invalid (safe to keep, but `try_get` will return null)
 
 ---
 
@@ -199,9 +199,9 @@ Notes:
 
 ### Creating a proxy
 ```cpp
-auto proxy = world.get_proxy(e); // shared_ptr<EntityProxy>
+auto proxy = world.get_proxy(e); // EntityProxyRef
 ```
-If a proxy already exists for the entity, the same `shared_ptr` is returned.
+If a proxy already exists for the entity, the same proxy object is reused (handles compare equal).
 
 ### Accessing components
 ```cpp
@@ -219,11 +219,11 @@ The world keeps proxy caches synchronized for the entity:
 - add -> cache pointer
 - remove -> mark missing
 - move (swap-erase) -> update pointer
-- destroy -> invalidate all + mark dead
+- destroy -> proxy becomes invalid (do not use old pointers)
 
 Important:
 - Proxies are best treated as **frame-local**
-- After major structural changes or snapshot/restore, call `clear_cache()` or discard proxies
+- After major structural changes or snapshot/restore, discard proxies
 
 ---
 

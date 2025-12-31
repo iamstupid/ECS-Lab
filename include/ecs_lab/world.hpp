@@ -17,6 +17,7 @@
 namespace ecs_lab {
 
 class EntityProxy;
+class EntityProxyRef;
 
 template <typename T>
 struct QueryAccess {
@@ -58,7 +59,11 @@ public:
     pools_.resize(kMaxComponents);
   }
 
-  std::shared_ptr<EntityProxy> get_proxy(Entity e);
+  // Ref-counted handle to a World-owned proxy.
+  // Notes:
+  // - Safe to keep after entity destroy / restore (it becomes invalid, but won't UAF).
+  // - Proxies are best treated as frame-local.
+  EntityProxyRef get_proxy(Entity e);
 
   Entity create() {
     const std::uint32_t idx = arena_.alloc();
@@ -410,6 +415,8 @@ public:
   }
 
   void restore(const Snapshot& snap) {
+    // Proxies cache component pointers; restoring invalidates all caches.
+    invalidate_all_proxies();
     arena_ = snap.arena.clone_with_resource(&idx_resource_);
     pools_.clear();
     pools_.resize(kMaxComponents);
@@ -519,27 +526,35 @@ private:
   LinearArena arena_;
   std::vector<std::unique_ptr<IPool>> pools_;
   std::uint64_t next_entity_id_ = 0;
+  EntityProxy* proxy_head_ = nullptr;
 
   template <typename T>
   friend class Pool;
+  friend class EntityProxy;
 
   void invalidate_proxy_component(EntityMeta& meta, ComponentId cid);
   void notify_proxy_missing(EntityMeta& meta, ComponentId cid);
   void notify_proxy_component_ptr(EntityMeta& meta, ComponentId cid, void* comp_ptr);
   void invalidate_proxy_all(EntityMeta& meta);
+  void invalidate_all_proxies();
+  void link_proxy(EntityProxy& proxy);
+  void unlink_proxy(EntityProxy& proxy);
+  void destroy_proxy(EntityProxy& proxy);
 };
 
 class EntityProxy {
 public:
   EntityProxy() = default;
   EntityProxy(World& world, Entity entity)
-      : world_(&world), entity_(entity) {
+      : owner_(&world), world_(&world), entity_(entity) {
     cache_.fill(nullptr);
   }
 
   void reset(World& world, Entity entity) {
+    owner_ = &world;
     world_ = &world;
     entity_ = entity;
+    alive_ = true;
     cache_.fill(nullptr);
   }
 
@@ -604,6 +619,17 @@ public:
   }
 
 private:
+  void add_ref() { ++ref_count_; }
+
+  void release_ref() {
+    assert(ref_count_ > 0);
+    --ref_count_;
+    if (ref_count_ == 0 && !linked_) {
+      assert(owner_ != nullptr);
+      owner_->destroy_proxy(*this);
+    }
+  }
+
   void invalidate_component(ComponentId cid) {
     if (cid < cache_.size()) {
       cache_[cid] = nullptr;
@@ -629,12 +655,18 @@ private:
   void mark_dead() {
     alive_ = false;
     world_ = nullptr;
-    entity_ = {};
+    // Keep `entity_` for debugging; proxy is invalid when !alive_.
+    invalidate_all();
   }
 
+  World* owner_ = nullptr;
   World* world_ = nullptr;
   Entity entity_{};
   bool alive_ = true;
+  bool linked_ = false;
+  std::uint32_t ref_count_ = 0;
+  EntityProxy* prev_ = nullptr;
+  EntityProxy* next_ = nullptr;
   std::array<void*, kMaxComponents> cache_{};
 
   static void* missing_tag() {
@@ -642,46 +674,187 @@ private:
   }
 
   friend class World;
+  friend class EntityProxyRef;
 };
 
-inline std::shared_ptr<EntityProxy> World::get_proxy(Entity e) {
+class EntityProxyRef {
+public:
+  EntityProxyRef() = default;
+
+  EntityProxyRef(const EntityProxyRef& other)
+      : proxy_(other.proxy_) {
+    if (proxy_) {
+      proxy_->add_ref();
+    }
+  }
+
+  EntityProxyRef& operator=(const EntityProxyRef& other) {
+    if (this == &other) {
+      return *this;
+    }
+    reset();
+    proxy_ = other.proxy_;
+    if (proxy_) {
+      proxy_->add_ref();
+    }
+    return *this;
+  }
+
+  EntityProxyRef(EntityProxyRef&& other) noexcept
+      : proxy_(other.proxy_) {
+    other.proxy_ = nullptr;
+  }
+
+  EntityProxyRef& operator=(EntityProxyRef&& other) noexcept {
+    if (this == &other) {
+      return *this;
+    }
+    reset();
+    proxy_ = other.proxy_;
+    other.proxy_ = nullptr;
+    return *this;
+  }
+
+  ~EntityProxyRef() { reset(); }
+
+  EntityProxy* get() const { return proxy_; }
+
+  EntityProxy* operator->() const {
+    assert(proxy_ != nullptr);
+    return proxy_;
+  }
+
+  EntityProxy& operator*() const {
+    assert(proxy_ != nullptr);
+    return *proxy_;
+  }
+
+  explicit operator bool() const { return proxy_ != nullptr; }
+
+  friend bool operator==(const EntityProxyRef& a, const EntityProxyRef& b) { return a.proxy_ == b.proxy_; }
+  friend bool operator!=(const EntityProxyRef& a, const EntityProxyRef& b) { return a.proxy_ != b.proxy_; }
+
+  friend bool operator==(const EntityProxyRef& a, std::nullptr_t) { return a.proxy_ == nullptr; }
+  friend bool operator!=(const EntityProxyRef& a, std::nullptr_t) { return a.proxy_ != nullptr; }
+  friend bool operator==(std::nullptr_t, const EntityProxyRef& a) { return a.proxy_ == nullptr; }
+  friend bool operator!=(std::nullptr_t, const EntityProxyRef& a) { return a.proxy_ != nullptr; }
+
+private:
+  explicit EntityProxyRef(EntityProxy& proxy)
+      : proxy_(&proxy) {
+    proxy_->add_ref();
+  }
+
+  void reset() {
+    if (!proxy_) {
+      return;
+    }
+    proxy_->release_ref();
+    proxy_ = nullptr;
+  }
+
+  EntityProxy* proxy_ = nullptr;
+
+  friend class World;
+};
+
+inline EntityProxyRef World::get_proxy(Entity e) {
   auto* meta = validate(e);
   if (!meta) {
     return {};
   }
-  if (auto existing = meta->proxy.lock()) {
-    return existing;
+
+  if (meta->proxy) {
+    return EntityProxyRef{*meta->proxy};
   }
+
   auto alloc = std::pmr::polymorphic_allocator<EntityProxy>(&proxy_resource_);
-  auto proxy = std::allocate_shared<EntityProxy>(alloc, *this, e);
+  EntityProxy* proxy = alloc.allocate(1);
+  std::construct_at(proxy, *this, e);
   meta->proxy = proxy;
-  return proxy;
+  proxy->linked_ = true;
+  link_proxy(*proxy);
+  return EntityProxyRef{*proxy};
 }
 
 inline void World::invalidate_proxy_component(EntityMeta& meta, ComponentId cid) {
-  if (auto proxy = meta.proxy.lock()) {
-    proxy->invalidate_component(cid);
+  if (meta.proxy) {
+    meta.proxy->invalidate_component(cid);
   }
 }
 
 inline void World::notify_proxy_missing(EntityMeta& meta, ComponentId cid) {
-  if (auto proxy = meta.proxy.lock()) {
-    proxy->mark_missing(cid);
+  if (meta.proxy) {
+    meta.proxy->mark_missing(cid);
   }
 }
 
 inline void World::notify_proxy_component_ptr(EntityMeta& meta, ComponentId cid, void* comp_ptr) {
-  if (auto proxy = meta.proxy.lock()) {
-    proxy->cache_component(cid, comp_ptr);
+  if (meta.proxy) {
+    meta.proxy->cache_component(cid, comp_ptr);
   }
 }
 
 inline void World::invalidate_proxy_all(EntityMeta& meta) {
-  if (auto proxy = meta.proxy.lock()) {
-    proxy->invalidate_all();
-    proxy->mark_dead();
+  if (meta.proxy) {
+    meta.proxy->invalidate_all();
+    meta.proxy->mark_dead();
+    meta.proxy->linked_ = false;
+    if (meta.proxy->ref_count_ == 0) {
+      destroy_proxy(*meta.proxy);
+    }
   }
-  meta.proxy.reset();
+  meta.proxy = nullptr;
+}
+
+inline void World::invalidate_all_proxies() {
+  EntityProxy* it = proxy_head_;
+  while (it) {
+    EntityProxy* next = it->next_;
+    it->invalidate_all();
+    it->mark_dead();
+    it->linked_ = false;
+    if (it->ref_count_ == 0) {
+      destroy_proxy(*it);
+    }
+    it = next;
+  }
+
+  if (!proxy_head_) {
+    proxy_resource_.release();
+  }
+}
+
+inline void World::link_proxy(EntityProxy& proxy) {
+  assert(proxy.prev_ == nullptr);
+  assert(proxy.next_ == nullptr);
+  proxy.next_ = proxy_head_;
+  if (proxy_head_) {
+    proxy_head_->prev_ = &proxy;
+  }
+  proxy_head_ = &proxy;
+}
+
+inline void World::unlink_proxy(EntityProxy& proxy) {
+  if (proxy.prev_) {
+    proxy.prev_->next_ = proxy.next_;
+  } else {
+    proxy_head_ = proxy.next_;
+  }
+  if (proxy.next_) {
+    proxy.next_->prev_ = proxy.prev_;
+  }
+  proxy.prev_ = nullptr;
+  proxy.next_ = nullptr;
+}
+
+inline void World::destroy_proxy(EntityProxy& proxy) {
+  assert(!proxy.linked_);
+  assert(proxy.ref_count_ == 0);
+  unlink_proxy(proxy);
+  auto alloc = std::pmr::polymorphic_allocator<EntityProxy>(&proxy_resource_);
+  std::destroy_at(&proxy);
+  alloc.deallocate(&proxy, 1);
 }
 
 template <typename T>
